@@ -150,42 +150,47 @@ int db_load_clients(App *app) {
     return SQLITE_OK;
 }
 
+static int invoice_number_exists(sqlite3 *db, const char *number) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM invoices WHERE number=?", -1, &st, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, number, -1, SQLITE_TRANSIENT);
+    int exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return exists ? 1 : 0;
+}
+
 static char *next_invoice_number(sqlite3 *db) {
     sqlite3_stmt *st;
     int seq = 1;
 
-    // Essayer jusqu'à trouver un numéro libre
-    for (int attempt = 0; attempt < 100; attempt++) {
-        if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(id),0)+1 FROM invoices", -1, &st, NULL) == SQLITE_OK) {
-            if (sqlite3_step(st) == SQLITE_ROW) {
-                seq = sqlite3_column_int(st,0);
-            }
-            sqlite3_finalize(st);
-        }
-
-        GDateTime *now = g_date_time_new_now_local();
-        int year = g_date_time_get_year(now);
-        char *num = g_strdup_printf("FAC-%04d-%04d", year, seq);
-        g_date_time_unref(now);
-
-        // Vérifier que le numéro n'existe pas déjà
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM invoices WHERE number=?", -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, num, -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(st) == SQLITE_DONE) {
-                sqlite3_finalize(st);
-                return num;
-            }
-            sqlite3_finalize(st);
-            seq++;
-            g_free(num);
-            num = g_strdup_printf("FAC-%04d-%04d", year, seq);
-        } else {
-            g_free(num);
-            return g_strdup("FAC-ERROR");
-        }
+    if (sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(id),0)+1 FROM invoices", -1, &st, NULL) != SQLITE_OK) {
+        return NULL;
     }
-    
-    return g_strdup("FAC-ERROR");
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        seq = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+
+    GDateTime *now = g_date_time_new_now_local();
+    int year = g_date_time_get_year(now);
+    g_date_time_unref(now);
+
+    for (int attempt = 0; attempt < 100; attempt++) {
+        char *num = g_strdup_printf("FAC-%04d-%04d", year, seq);
+        int check = invoice_number_exists(db, num);
+        if (check == 0) {
+            return num;
+        }
+        g_free(num);
+        if (check < 0) {
+            return NULL;
+        }
+        seq++;
+    }
+
+    return NULL;
 }
 
 int db_create_invoice(App *app, int client_id) {
@@ -195,6 +200,10 @@ int db_create_invoice(App *app, int client_id) {
 
     sqlite3_exec(app->db, "BEGIN", NULL, NULL, NULL);
     char *number = next_invoice_number(app->db);
+    if (!number) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        return SQLITE_ERROR;
+    }
     sqlite3_stmt *inv;
 
     if (sqlite3_prepare_v2(app->db, "INSERT INTO invoices(number,client_id) VALUES(?,?)", -1, &inv, NULL) != SQLITE_OK) {
