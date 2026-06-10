@@ -221,35 +221,18 @@ static char *next_invoice_number(sqlite3 *db) {
     return NULL;
 }
 
-int db_create_invoice(App *app, int client_id) {
+static int insert_lines_from_store(App *app, int invoice_id, double *total_ht, double *total_tva, double *total_ttc) {
     GtkTreeIter iter;
     gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app->lines_store), &iter);
-    if (!valid) return SQLITE_MISUSE;
+    int ok = valid;
 
-    if (!db_exec(app->db, "BEGIN")) return SQLITE_ERROR;
-    char *number = next_invoice_number(app->db);
-    if (!number) {
-        db_exec(app->db, "ROLLBACK");
-        return SQLITE_ERROR;
-    }
-    sqlite3_stmt *inv;
-
-    if (sqlite3_prepare_v2(app->db, "INSERT INTO invoices(number,client_id) VALUES(?,?)", -1, &inv, NULL) != SQLITE_OK) {
-        db_exec(app->db, "ROLLBACK");
-        g_free(number);
-        return SQLITE_ERROR;
-    }
-
-    sqlite3_bind_text(inv,1,number,-1,SQLITE_TRANSIENT);
-    sqlite3_bind_int(inv,2,client_id);
-    int ok = sqlite3_step(inv) == SQLITE_DONE;
-    sqlite3_finalize(inv);
-
-    int invoice_id = (int)sqlite3_last_insert_rowid(app->db);
-    double total_ht=0,total_tva=0,total_ttc=0;
+    *total_ht = 0;
+    *total_tva = 0;
+    *total_ttc = 0;
 
     while (valid && ok) {
-        gchar *desc=NULL; double qty=0, price=0, vat=0;
+        gchar *desc = NULL;
+        double qty = 0, price = 0, vat = 0;
         gtk_tree_model_get(GTK_TREE_MODEL(app->lines_store), &iter, 0, &desc, 1, &qty, 2, &price, 3, &vat, -1);
 
         if (price <= 0 || qty <= 0 || vat < 0) {
@@ -265,36 +248,92 @@ int db_create_invoice(App *app, int client_id) {
         ok = sqlite3_prepare_v2(app->db, "INSERT INTO invoice_lines(invoice_id,description,quantity,unit_price,vat_rate,line_ht,line_tva,line_ttc) VALUES(?,?,?,?,?,?,?,?)", -1, &line, NULL) == SQLITE_OK;
 
         if (ok) {
-            sqlite3_bind_int(line,1,invoice_id);
-            sqlite3_bind_text(line,2,desc,-1,SQLITE_TRANSIENT);
-            sqlite3_bind_double(line,3,qty);
-            sqlite3_bind_double(line,4,price);
-            sqlite3_bind_double(line,5,vat);
-            sqlite3_bind_double(line,6,ht);
-            sqlite3_bind_double(line,7,tva);
-            sqlite3_bind_double(line,8,ttc);
+            sqlite3_bind_int(line, 1, invoice_id);
+            sqlite3_bind_text(line, 2, desc, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_double(line, 3, qty);
+            sqlite3_bind_double(line, 4, price);
+            sqlite3_bind_double(line, 5, vat);
+            sqlite3_bind_double(line, 6, ht);
+            sqlite3_bind_double(line, 7, tva);
+            sqlite3_bind_double(line, 8, ttc);
             ok = sqlite3_step(line) == SQLITE_DONE;
             sqlite3_finalize(line);
         }
 
-        total_ht = round_money(total_ht + ht);
-        total_tva = round_money(total_tva + tva);
-        total_ttc = round_money(total_ttc + ttc);
+        *total_ht = round_money(*total_ht + ht);
+        *total_tva = round_money(*total_tva + tva);
+        *total_ttc = round_money(*total_ttc + ttc);
         g_free(desc);
         valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(app->lines_store), &iter);
     }
 
+    return ok;
+}
+
+static int update_invoice_totals(App *app, int invoice_id, double total_ht, double total_tva, double total_ttc) {
+    sqlite3_stmt *up;
+    if (sqlite3_prepare_v2(app->db, "UPDATE invoices SET total_ht=?, total_tva=?, total_ttc=? WHERE id=?", -1, &up, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_double(up, 1, total_ht);
+    sqlite3_bind_double(up, 2, total_tva);
+    sqlite3_bind_double(up, 3, total_ttc);
+    sqlite3_bind_int(up, 4, invoice_id);
+    int ok = sqlite3_step(up) == SQLITE_DONE;
+    sqlite3_finalize(up);
+    return ok;
+}
+
+static int invoice_status_is_draft(sqlite3 *db, int invoice_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT status FROM invoices WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int(st, 1, invoice_id);
+    int is_draft = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *status = safe_text(sqlite3_column_text(st, 0));
+        is_draft = strcmp(status, "brouillon") == 0 ? 1 : 0;
+    } else {
+        is_draft = -1;
+    }
+    sqlite3_finalize(st);
+    return is_draft;
+}
+
+int db_create_invoice(App *app, int client_id) {
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app->lines_store), &iter)) {
+        return SQLITE_MISUSE;
+    }
+
+    if (!db_exec(app->db, "BEGIN")) return SQLITE_ERROR;
+    char *number = next_invoice_number(app->db);
+    if (!number) {
+        db_exec(app->db, "ROLLBACK");
+        return SQLITE_ERROR;
+    }
+    sqlite3_stmt *inv;
+
+    if (sqlite3_prepare_v2(app->db, "INSERT INTO invoices(number,client_id) VALUES(?,?)", -1, &inv, NULL) != SQLITE_OK) {
+        db_exec(app->db, "ROLLBACK");
+        g_free(number);
+        return SQLITE_ERROR;
+    }
+
+    sqlite3_bind_text(inv, 1, number, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(inv, 2, client_id);
+    int ok = sqlite3_step(inv) == SQLITE_DONE;
+    sqlite3_finalize(inv);
+
+    int invoice_id = (int)sqlite3_last_insert_rowid(app->db);
+    double total_ht = 0, total_tva = 0, total_ttc = 0;
+
     if (ok) {
-        sqlite3_stmt *up;
-        ok = sqlite3_prepare_v2(app->db, "UPDATE invoices SET total_ht=?, total_tva=?, total_ttc=? WHERE id=?", -1, &up, NULL) == SQLITE_OK;
-        if (ok) {
-            sqlite3_bind_double(up,1,total_ht);
-            sqlite3_bind_double(up,2,total_tva);
-            sqlite3_bind_double(up,3,total_ttc);
-            sqlite3_bind_int(up,4,invoice_id);
-            ok = sqlite3_step(up) == SQLITE_DONE;
-            sqlite3_finalize(up);
-        }
+        ok = insert_lines_from_store(app, invoice_id, &total_ht, &total_tva, &total_ttc);
+    }
+    if (ok) {
+        ok = update_invoice_totals(app, invoice_id, total_ht, total_tva, total_ttc);
     }
 
     if (ok) {
@@ -308,6 +347,126 @@ int db_create_invoice(App *app, int client_id) {
     }
     g_free(number);
     return ok ? SQLITE_OK : SQLITE_ERROR;
+}
+
+void db_free_invoice_lines(InvoiceLineData *lines, int line_count) {
+    if (!lines) return;
+    for (int i = 0; i < line_count; i++) {
+        g_free(lines[i].description);
+    }
+    g_free(lines);
+}
+
+int db_read_draft_invoice(App *app, int invoice_id, int *client_id_out, InvoiceLineData **lines_out, int *line_count_out) {
+    sqlite3_stmt *st;
+    if (lines_out) *lines_out = NULL;
+    if (line_count_out) *line_count_out = 0;
+
+    if (sqlite3_prepare_v2(app->db, "SELECT client_id, status FROM invoices WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    sqlite3_bind_int(st, 1, invoice_id);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        sqlite3_finalize(st);
+        return SQLITE_MISUSE;
+    }
+    int client_id = sqlite3_column_int(st, 0);
+    const char *status = safe_text(sqlite3_column_text(st, 1));
+    if (strcmp(status, "brouillon") != 0) {
+        sqlite3_finalize(st);
+        return SQLITE_MISUSE;
+    }
+    sqlite3_finalize(st);
+
+    if (sqlite3_prepare_v2(app->db, "SELECT description,quantity,unit_price,vat_rate FROM invoice_lines WHERE invoice_id=? ORDER BY id", -1, &st, NULL) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    sqlite3_bind_int(st, 1, invoice_id);
+
+    int capacity = 8;
+    int count = 0;
+    InvoiceLineData *lines = g_new0(InvoiceLineData, capacity);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (count >= capacity) {
+            capacity *= 2;
+            lines = g_renew(InvoiceLineData, lines, capacity);
+        }
+        lines[count].description = g_strdup(safe_text(sqlite3_column_text(st, 0)));
+        lines[count].quantity = sqlite3_column_double(st, 1);
+        lines[count].unit_price = sqlite3_column_double(st, 2);
+        lines[count].vat_rate = sqlite3_column_double(st, 3);
+        count++;
+    }
+    sqlite3_finalize(st);
+
+    if (client_id_out) *client_id_out = client_id;
+    if (lines_out) *lines_out = lines;
+    else db_free_invoice_lines(lines, count);
+    if (line_count_out) *line_count_out = count;
+    return SQLITE_OK;
+}
+
+int db_update_draft_invoice(App *app, int invoice_id, int client_id) {
+    if (invoice_status_is_draft(app->db, invoice_id) != 1) {
+        return SQLITE_MISUSE;
+    }
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app->lines_store), &iter)) {
+        return SQLITE_MISUSE;
+    }
+
+    if (!db_exec(app->db, "BEGIN")) return SQLITE_ERROR;
+
+    sqlite3_stmt *up;
+    int ok = sqlite3_prepare_v2(app->db, "UPDATE invoices SET client_id=? WHERE id=? AND status='brouillon'", -1, &up, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_int(up, 1, client_id);
+        sqlite3_bind_int(up, 2, invoice_id);
+        ok = sqlite3_step(up) == SQLITE_DONE && sqlite3_changes(app->db) > 0;
+        sqlite3_finalize(up);
+    }
+
+    if (ok) {
+        if (sqlite3_prepare_v2(app->db, "DELETE FROM invoice_lines WHERE invoice_id=?", -1, &up, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(up, 1, invoice_id);
+            ok = sqlite3_step(up) == SQLITE_DONE;
+            sqlite3_finalize(up);
+        } else {
+            ok = 0;
+        }
+    }
+
+    double total_ht = 0, total_tva = 0, total_ttc = 0;
+    if (ok) {
+        ok = insert_lines_from_store(app, invoice_id, &total_ht, &total_tva, &total_ttc);
+    }
+    if (ok) {
+        ok = update_invoice_totals(app, invoice_id, total_ht, total_tva, total_ttc);
+    }
+
+    if (ok) {
+        if (!db_exec(app->db, "COMMIT")) {
+            db_exec(app->db, "ROLLBACK");
+            return SQLITE_ERROR;
+        }
+    } else {
+        db_exec(app->db, "ROLLBACK");
+    }
+    return ok ? SQLITE_OK : SQLITE_ERROR;
+}
+
+int db_delete_draft_invoice(App *app, int invoice_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(app->db, "DELETE FROM invoices WHERE id=? AND status='brouillon'", -1, &st, NULL) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    sqlite3_bind_int(st, 1, invoice_id);
+    int rc = sqlite3_step(st) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
+    sqlite3_finalize(st);
+    if (rc == SQLITE_OK && sqlite3_changes(app->db) == 0) {
+        return SQLITE_MISUSE;
+    }
+    return rc;
 }
 
 int db_load_invoices(App *app) {

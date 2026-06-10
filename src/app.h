@@ -20,6 +20,13 @@ typedef struct {
 } InvoiceLine;
 
 typedef struct {
+    char *description;
+    double quantity;
+    double unit_price;
+    double vat_rate;
+} InvoiceLineData;
+
+typedef struct {
     sqlite3 *db;
     GtkWidget *window;
     GtkWidget *company_name, *company_siret, *company_address, *company_email, *company_phone, *company_legal;
@@ -27,6 +34,8 @@ typedef struct {
     GtkWidget *line_desc, *line_qty, *line_price, *line_vat;
     GtkWidget *lines_view, *invoices_view, *status_label;
     GtkListStore *clients_store, *lines_store, *invoices_store;
+    GtkWidget *notebook, *invoice_action_btn, *cancel_edit_btn, *edit_label, *remove_line_btn;
+    int editing_invoice_id, selected_invoice_id;
 } App;
 
 int db_open(App *app);
@@ -39,6 +48,10 @@ int db_load_clients(App *app);
 int db_create_invoice(App *app, int client_id);
 int db_load_invoices(App *app);
 int db_update_invoice_status(App *app, int invoice_id, const char *status);
+int db_read_draft_invoice(App *app, int invoice_id, int *client_id_out, InvoiceLineData **lines_out, int *line_count_out);
+void db_free_invoice_lines(InvoiceLineData *lines, int line_count);
+int db_update_draft_invoice(App *app, int invoice_id, int client_id);
+int db_delete_draft_invoice(App *app, int invoice_id);
 
 char *invoice_export_pdf(App *app, int invoice_id);
 const char *invoice_export_error_message(void);
