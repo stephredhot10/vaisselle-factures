@@ -119,8 +119,11 @@ static GtkWidget *invoices_tab(App *app) {
 static void activate(GtkApplication *gtk_app, gpointer user_data) {
     App *app=user_data; app->window=gtk_application_window_new(gtk_app); gtk_window_set_title(GTK_WINDOW(app->window),"Vaisselle Factures"); gtk_window_set_default_size(GTK_WINDOW(app->window),900,620);
     GtkWidget *main=gtk_box_new(GTK_ORIENTATION_VERTICAL,0); GtkWidget *tabs=gtk_notebook_new(); gtk_notebook_append_page(GTK_NOTEBOOK(tabs), company_tab(app), gtk_label_new("Entreprise")); gtk_notebook_append_page(GTK_NOTEBOOK(tabs), clients_tab(app), gtk_label_new("Clients")); gtk_notebook_append_page(GTK_NOTEBOOK(tabs), invoice_tab(app), gtk_label_new("Facture")); gtk_notebook_append_page(GTK_NOTEBOOK(tabs), invoices_tab(app), gtk_label_new("Factures")); app->status_label=gtk_label_new("Prêt"); gtk_box_pack_start(GTK_BOX(main),tabs,TRUE,TRUE,0); gtk_box_pack_start(GTK_BOX(main),app->status_label,FALSE,FALSE,6); gtk_container_add(GTK_CONTAINER(app->window),main);
-    if (db_open(app)!=SQLITE_OK) { show_error(GTK_WINDOW(app->window),"Impossible d’ouvrir la base SQLite"); return; }
-    db_load_company(app); db_load_clients(app); db_load_invoices(app); gtk_widget_show_all(app->window);
+    gtk_widget_show_all(app->window);
+    if (db_open(app)!=SQLITE_OK) { show_error(GTK_WINDOW(app->window),"Impossible d’ouvrir la base SQLite"); set_status(app,"Erreur base de données"); return; }
+    if (db_load_company(app)!=SQLITE_OK) { show_error(GTK_WINDOW(app->window),"Impossible de charger les données entreprise"); set_status(app,"Erreur chargement entreprise"); return; }
+    if (db_load_clients(app)!=SQLITE_OK) { show_error(GTK_WINDOW(app->window),"Impossible de charger les clients"); set_status(app,"Erreur chargement clients"); return; }
+    if (db_load_invoices(app)!=SQLITE_OK) { show_error(GTK_WINDOW(app->window),"Impossible de charger les factures"); set_status(app,"Erreur chargement factures"); return; }
 }
 
 int main(int argc, char **argv) { App app; memset(&app,0,sizeof(app)); GtkApplication *gapp=gtk_application_new("fr.cyril103.vaissellefactures", G_APPLICATION_DEFAULT_FLAGS); g_signal_connect(gapp,"activate",G_CALLBACK(activate),&app); int status=g_application_run(G_APPLICATION(gapp),argc,argv); db_close(&app); g_object_unref(gapp); return status; }
