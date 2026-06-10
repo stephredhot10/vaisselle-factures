@@ -28,6 +28,23 @@ static const char *safe_text(const unsigned char *text) {
     return text ? (const char *)text : "";
 }
 
+static int db_exec(sqlite3 *db, const char *sql) {
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static double round_money(double v) {
+    long long cents = (long long)(v * 100.0 + (v >= 0 ? 0.5 : -0.5));
+    return cents / 100.0;
+}
+
+static int valid_invoice_status(const char *status) {
+    return status && (
+        strcmp(status, "brouillon") == 0 ||
+        strcmp(status, "envoyée") == 0 ||
+        strcmp(status, "payée") == 0
+    );
+}
+
 int db_open(App *app) {
     char *path = app_data_path("vaisselle_factures.db");
     if (!path) return SQLITE_CANTOPEN;
@@ -111,7 +128,6 @@ int db_load_company(App *app) {
 int db_add_client(App *app) {
     const char *name = gtk_entry_get_text(GTK_ENTRY(app->client_name));
     if (!name || strlen(name) == 0 || strlen(name) >= 255) {
-        show_error(GTK_WINDOW(app->window), "Nom client invalide (1-255 caractères)");
         return SQLITE_MISUSE;
     }
 
@@ -198,16 +214,16 @@ int db_create_invoice(App *app, int client_id) {
     gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app->lines_store), &iter);
     if (!valid) return SQLITE_MISUSE;
 
-    sqlite3_exec(app->db, "BEGIN", NULL, NULL, NULL);
+    if (!db_exec(app->db, "BEGIN")) return SQLITE_ERROR;
     char *number = next_invoice_number(app->db);
     if (!number) {
-        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        db_exec(app->db, "ROLLBACK");
         return SQLITE_ERROR;
     }
     sqlite3_stmt *inv;
 
     if (sqlite3_prepare_v2(app->db, "INSERT INTO invoices(number,client_id) VALUES(?,?)", -1, &inv, NULL) != SQLITE_OK) {
-        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        db_exec(app->db, "ROLLBACK");
         g_free(number);
         return SQLITE_ERROR;
     }
@@ -224,14 +240,15 @@ int db_create_invoice(App *app, int client_id) {
         gchar *desc=NULL; double qty=0, price=0, vat=0;
         gtk_tree_model_get(GTK_TREE_MODEL(app->lines_store), &iter, 0, &desc, 1, &qty, 2, &price, 3, &vat, -1);
 
-        // Validation des valeurs
-        if (price < 0 || qty <= 0 || vat < 0) {
+        if (price <= 0 || qty <= 0 || vat < 0) {
             ok = 0;
             g_free(desc);
             break;
         }
 
-        double ht = qty*price, tva = ht*vat/100.0, ttc = ht+tva;
+        double ht = round_money(qty * price);
+        double tva = round_money(ht * vat / 100.0);
+        double ttc = round_money(ht + tva);
         sqlite3_stmt *line;
         ok = sqlite3_prepare_v2(app->db, "INSERT INTO invoice_lines(invoice_id,description,quantity,unit_price,vat_rate,line_ht,line_tva,line_ttc) VALUES(?,?,?,?,?,?,?,?)", -1, &line, NULL) == SQLITE_OK;
 
@@ -248,7 +265,9 @@ int db_create_invoice(App *app, int client_id) {
             sqlite3_finalize(line);
         }
 
-        total_ht += ht; total_tva += tva; total_ttc += ttc;
+        total_ht = round_money(total_ht + ht);
+        total_tva = round_money(total_tva + tva);
+        total_ttc = round_money(total_ttc + ttc);
         g_free(desc);
         valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(app->lines_store), &iter);
     }
@@ -266,7 +285,15 @@ int db_create_invoice(App *app, int client_id) {
         }
     }
 
-    sqlite3_exec(app->db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+    if (ok) {
+        if (!db_exec(app->db, "COMMIT")) {
+            db_exec(app->db, "ROLLBACK");
+            g_free(number);
+            return SQLITE_ERROR;
+        }
+    } else {
+        db_exec(app->db, "ROLLBACK");
+    }
     g_free(number);
     return ok ? SQLITE_OK : SQLITE_ERROR;
 }
@@ -296,6 +323,7 @@ int db_load_invoices(App *app) {
 }
 
 int db_update_invoice_status(App *app, int invoice_id, const char *status) {
+    if (!valid_invoice_status(status)) return SQLITE_MISUSE;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(app->db, "UPDATE invoices SET status=? WHERE id=?", -1, &st, NULL) != SQLITE_OK) {
         return SQLITE_ERROR;

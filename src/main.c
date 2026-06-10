@@ -25,7 +25,8 @@ static void on_save_company(GtkButton *b, gpointer data) { (void)b; App *app=dat
 static void on_add_client(GtkButton *b, gpointer data) {
     (void)b;
     App *app=data;
-    if (db_add_client(app)==SQLITE_OK) {
+    int rc = db_add_client(app);
+    if (rc == SQLITE_OK) {
         db_load_clients(app);
         gtk_entry_set_text(GTK_ENTRY(app->client_name),"");
         gtk_entry_set_text(GTK_ENTRY(app->client_email),"");
@@ -33,8 +34,10 @@ static void on_add_client(GtkButton *b, gpointer data) {
         GtkTextBuffer *addr = gtk_text_view_get_buffer(GTK_TEXT_VIEW(app->client_address));
         gtk_text_buffer_set_text(addr, "", -1);
         set_status(app,"Client ajouté");
+    } else if (rc == SQLITE_MISUSE) {
+        show_error(GTK_WINDOW(app->window),"Nom client invalide (1-255 caractères)");
     } else {
-        show_error(GTK_WINDOW(app->window),"Nom client obligatoire ou erreur base de données");
+        show_error(GTK_WINDOW(app->window),"Erreur base de données lors de l'ajout du client");
     }
 }
 
@@ -59,13 +62,13 @@ static void on_add_line(GtkButton *b, gpointer data) {
 static int selected_client_id(App *app) { GtkTreeIter it; if (!gtk_combo_box_get_active_iter(GTK_COMBO_BOX(app->client_combo), &it)) return 0; int id=0; gtk_tree_model_get(GTK_TREE_MODEL(app->clients_store), &it, 0, &id, -1); return id; }
 static int selected_invoice_id(App *app) { GtkTreeSelection *sel=gtk_tree_view_get_selection(GTK_TREE_VIEW(app->invoices_view)); GtkTreeIter it; GtkTreeModel *m; if (!gtk_tree_selection_get_selected(sel,&m,&it)) return 0; int id=0; gtk_tree_model_get(m,&it,0,&id,-1); return id; }
 
-static void on_create_invoice(GtkButton *b, gpointer data) { (void)b; App *app=data; int cid=selected_client_id(app); if (!cid) { show_error(GTK_WINDOW(app->window),"Sélectionner un client"); return; } if (db_create_invoice(app,cid)==SQLITE_OK) { gtk_list_store_clear(app->lines_store); db_load_invoices(app); set_status(app,"Facture créée"); } else show_error(GTK_WINDOW(app->window),"Impossible de créer la facture : vérifier qu’il y a au moins une ligne"); }
+static void on_create_invoice(GtkButton *b, gpointer data) { (void)b; App *app=data; int cid=selected_client_id(app); if (!cid) { show_error(GTK_WINDOW(app->window),"Sélectionner un client"); return; } int rc=db_create_invoice(app,cid); if (rc==SQLITE_OK) { gtk_list_store_clear(app->lines_store); db_load_invoices(app); set_status(app,"Facture créée"); } else if (rc==SQLITE_MISUSE) show_error(GTK_WINDOW(app->window),"Impossible de créer la facture : ajouter au moins une ligne valide"); else show_error(GTK_WINDOW(app->window),"Impossible de créer la facture : erreur base de données ou numérotation"); }
 static void on_refresh_invoices(GtkButton *b, gpointer data) { (void)b; db_load_invoices(data); }
 static void update_selected_status(App *app, const char *status) { int id=selected_invoice_id(app); if (!id) { show_error(GTK_WINDOW(app->window),"Sélectionner une facture"); return; } if (db_update_invoice_status(app,id,status)==SQLITE_OK) { db_load_invoices(app); set_status(app,"Statut mis à jour"); } else show_error(GTK_WINDOW(app->window),"Impossible de changer le statut"); }
 static void on_status_sent(GtkButton *b, gpointer data) { (void)b; update_selected_status(data, "envoyée"); }
 static void on_status_paid(GtkButton *b, gpointer data) { (void)b; update_selected_status(data, "payée"); }
 static void on_status_draft(GtkButton *b, gpointer data) { (void)b; update_selected_status(data, "brouillon"); }
-static void on_export(GtkButton *b, gpointer data) { (void)b; App *app=data; int id=selected_invoice_id(app); if (!id) { show_error(GTK_WINDOW(app->window),"Sélectionner une facture"); return; } char *p=invoice_export_html(app,id); if (p) { char *msg=g_strdup_printf("Export créé : %s", p); set_status(app,msg); g_free(msg); g_free(p); } else show_error(GTK_WINDOW(app->window),"Export impossible"); }
+static void on_export(GtkButton *b, gpointer data) { (void)b; App *app=data; int id=selected_invoice_id(app); if (!id) { show_error(GTK_WINDOW(app->window),"Sélectionner une facture"); return; } char *p=invoice_export_html(app,id); if (p) { char *msg=g_strdup_printf("Export créé : %s", p); set_status(app,msg); g_free(msg); g_free(p); } else show_error(GTK_WINDOW(app->window), invoice_export_error_message()); }
 
 static GtkWidget *company_tab(App *app) {
     GtkWidget *grid=gtk_grid_new(); gtk_grid_set_row_spacing(GTK_GRID(grid),8); gtk_grid_set_column_spacing(GTK_GRID(grid),8); gtk_container_set_border_width(GTK_CONTAINER(grid),12);
