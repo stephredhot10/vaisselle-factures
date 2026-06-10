@@ -31,11 +31,11 @@ static const char *safe_text(const unsigned char *text) {
 int db_open(App *app) {
     char *path = app_data_path("vaisselle_factures.db");
     if (!path) return SQLITE_CANTOPEN;
+    sqlite3_config(SQLITE_CONFIG_SERIALIZED);
     int rc = sqlite3_open(path, &app->db);
     g_free(path);
     if (rc != SQLITE_OK) return rc;
     sqlite3_exec(app->db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
-    sqlite3_config(SQLITE_CONFIG_SERIALIZED);
     return db_init(app->db);
 }
 

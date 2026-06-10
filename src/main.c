@@ -15,6 +15,7 @@ static void add_labeled(GtkWidget *grid, int row, const char *label, GtkWidget *
 
 static GtkWidget *tree_col(GtkWidget *view, const char *title, int col, gboolean money) {
     GtkCellRenderer *r = gtk_cell_renderer_text_new();
+    if (money) g_object_set(r, "xalign", 1.0, NULL);
     GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(title, r, "text", col, NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(view), c);
     return view;
@@ -122,4 +123,4 @@ static void activate(GtkApplication *gtk_app, gpointer user_data) {
     db_load_company(app); db_load_clients(app); db_load_invoices(app); gtk_widget_show_all(app->window);
 }
 
-int main(int argc, char **argv) { App app; memset(&app,0,sizeof(app)); GtkApplication *gapp=gtk_application_new("fr.cyril103.vaissellefactures", G_APPLICATION_FLAGS_NONE); g_signal_connect(gapp,"activate",G_CALLBACK(activate),&app); int status=g_application_run(G_APPLICATION(gapp),argc,argv); db_close(&app); g_object_unref(gapp); return status; }
+int main(int argc, char **argv) { App app; memset(&app,0,sizeof(app)); GtkApplication *gapp=gtk_application_new("fr.cyril103.vaissellefactures", G_APPLICATION_DEFAULT_FLAGS); g_signal_connect(gapp,"activate",G_CALLBACK(activate),&app); int status=g_application_run(G_APPLICATION(gapp),argc,argv); db_close(&app); g_object_unref(gapp); return status; }
